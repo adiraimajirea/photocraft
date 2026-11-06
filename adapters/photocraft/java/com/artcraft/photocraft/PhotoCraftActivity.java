@@ -664,6 +664,7 @@ public final class PhotoCraftActivity extends NativeActivity {
         // the links the shell makes at startup are refreshed when the access arrives.
         requestStoragePermission();
         handleIncomingFiles(getIntent());
+        io.execute(() -> purgePdfScratch(new File(getCacheDir(), "pdf-import")));
         // Ask GitHub whether a newer builder release exists (a few seconds in, off the main
         // thread). The shared checker is installed next to this Activity by the builder.
         com.artcraft.updater.UpdateCheck.start(this);
@@ -1078,24 +1079,49 @@ public final class PhotoCraftActivity extends NativeActivity {
         }
         File cacheDir = new File(getCacheDir(), "pdf-import");
         if (!cacheDir.mkdirs() && !cacheDir.isDirectory()) throw new Exception("Could not create the PDF import folder");
+        // Imports run one at a time on the I/O thread, so anything left here was orphaned by an earlier
+        // run that was killed; it may hold an unlocked copy of a protected document.
+        purgePdfScratch(cacheDir);
         File scratch = File.createTempFile("import-", ".pdf", cacheDir);
+        File unlocked = null;
         try {
             copyUriToFile(uri, scratch);
-            final int pageCount = PdfImport.pageCount(scratch);
             String name = displayName(uri);
             int dot = name.lastIndexOf('.');
             final String stem = dot > 0 ? name.substring(0, dot) : name;
+            File source = scratch;
+            int count;
+            try {
+                count = PdfImport.pageCount(scratch);
+            } catch (PdfImport.PasswordRequired locked) {
+                // Ask for the password and work from an unprotected copy; the original stays untouched.
+                unlocked = PdfImport.unlock(this, scratch, cacheDir, name);
+                if (unlocked == null) return staged; // cancelled
+                source = unlocked;
+                count = PdfImport.pageCount(unlocked);
+            }
+            final int pageCount = count;
             SharedPreferences prefs = getSharedPreferences(PDF_PREFS, MODE_PRIVATE);
             PdfImport.Options options = PdfImport.prompt(this, name, pageCount, prefs.getInt(PDF_DPI_KEY, PdfImport.DPI_STANDARD));
             if (options == null) return staged;
             prefs.edit().putInt(PDF_DPI_KEY, options.dpi).apply();
             showToast(options.pages.length == 1 ? "Importing PDF page\u2026" : "Importing " + options.pages.length + " PDF pages\u2026");
             // A null owner keeps newStageFile from reusing a name that belongs to a mapped document.
-            staged.files.addAll(PdfImport.render(scratch, options.pages, options.dpi, stem, fileName -> newStageFile(fileName, null)));
+            staged.files.addAll(PdfImport.render(source, options.pages, options.dpi, stem, fileName -> newStageFile(fileName, null)));
             staged.viaInbox = true;
             return staged;
         } finally {
             if (!scratch.delete()) Log.w(TAG, "Could not remove the scratch PDF " + scratch.getName());
+            if (unlocked != null && !unlocked.delete()) Log.w(TAG, "Could not remove the unlocked copy " + unlocked.getName());
+        }
+    }
+
+    /** Delete leftovers of PDF imports that never finished (scratch copies, including unlocked ones). */
+    private void purgePdfScratch(File dir) {
+        File[] leftovers = dir.listFiles();
+        if (leftovers == null) return;
+        for (File leftover : leftovers) {
+            if (leftover.isFile() && !leftover.delete()) Log.w(TAG, "Could not remove " + leftover.getName());
         }
     }
 

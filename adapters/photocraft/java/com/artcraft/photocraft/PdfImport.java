@@ -8,8 +8,12 @@ import android.graphics.Color;
 import android.graphics.pdf.PdfRenderer;
 import android.os.ParcelFileDescriptor;
 import android.text.InputType;
+import android.text.method.HideReturnsTransformationMethod;
+import android.text.method.PasswordTransformationMethod;
 import android.util.Log;
 import android.view.View;
+import android.view.WindowManager;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.RadioButton;
@@ -63,12 +67,26 @@ final class PdfImport {
     }
 
     /** A problem whose message is fit to show the user as is. */
-    static final class Failure extends Exception {
+    static class Failure extends Exception {
         private static final long serialVersionUID = 1L;
 
         Failure(String message) { super(message); }
 
         Failure(String message, Throwable cause) { super(message, cause); }
+    }
+
+    /** The PDF needs a password before any page can be read; see {@link #unlock}. */
+    static final class PasswordRequired extends Failure {
+        private static final long serialVersionUID = 1L;
+
+        PasswordRequired(Throwable cause) {
+            super("This PDF is password-protected.", cause);
+        }
+    }
+
+    /** Tells the password dialog whether what the user typed opens the PDF. */
+    interface PasswordCheck {
+        boolean accepts(String password);
     }
 
     /** Supplies the file a rendered page is written to (the activity picks a free name in its staging folder). */
@@ -104,10 +122,138 @@ final class PdfImport {
             if (count < 1) throw new Failure("This PDF has no pages.");
             return count;
         } catch (SecurityException e) {
-            throw new Failure("This PDF is password-protected. Remove the password, then import it again.", e);
+            throw new PasswordRequired(e);
         } catch (IOException | RuntimeException e) {
             throw new Failure("Could not read this PDF. The file may be damaged.", e);
         }
+    }
+
+    /**
+     * Ask for the password of a protected PDF and write an unprotected copy into {@code outDir}.
+     * {@link PdfRenderer} accepts a password only on the newest Android versions, so the copy is made
+     * by {@link PdfDecrypt}; either the user or the owner password works. The original file is never
+     * changed. The caller must delete the returned copy as soon as it has rendered what it needs.
+     *
+     * <p>Blocks the calling thread (never the UI thread) while the dialog is open. A wrong password
+     * is reported inside the dialog, which stays open for another try.
+     *
+     * @return the unprotected copy, or {@code null} when the user cancelled
+     */
+    static File unlock(Activity activity, File pdf, File outDir, String documentName) throws Failure {
+        try (PdfDecrypt decrypt = PdfDecrypt.open(pdf)) {
+            String password = "";
+            // A file that only has an owner password opens with an empty one; no need to ask.
+            if (!decrypt.authenticate(password)) {
+                password = promptPassword(activity, documentName, decrypt::authenticate);
+                if (password == null) return null;
+                if (!decrypt.authenticate(password)) throw new Failure("The password was not accepted.");
+            }
+            File unlocked = File.createTempFile("unlocked-", ".pdf", outDir);
+            try {
+                decrypt.writeDecrypted(unlocked);
+                return unlocked;
+            } catch (IOException | RuntimeException e) {
+                unlocked.delete();
+                throw e;
+            }
+        } catch (PdfDecrypt.Unsupported e) {
+            Log.w(TAG, "Cannot unlock the PDF: " + e.getMessage(), e);
+            throw new Failure("This PDF's protection is not supported, so it cannot be unlocked here.", e);
+        } catch (IOException | RuntimeException e) {
+            throw new Failure("Could not unlock this PDF.", e);
+        }
+    }
+
+    /**
+     * Show the password dialog and wait for the answer. The password is checked inside the dialog
+     * ({@code check} runs on the UI thread and is quick), so a wrong one never closes it.
+     *
+     * @return the accepted password, or {@code null} when the user cancelled or the dialog could not be shown
+     */
+    private static String promptPassword(final Activity activity, final String documentName, final PasswordCheck check) {
+        final Object cancelled = new Object();
+        final BlockingQueue<Object> answer = new ArrayBlockingQueue<>(1);
+        activity.runOnUiThread(() -> {
+            try {
+                showPasswordDialog(activity, documentName, check, answer, cancelled);
+            } catch (Throwable error) {
+                Log.e(TAG, "Could not show the PDF password dialog", error);
+                answer.offer(cancelled);
+            }
+        });
+        try {
+            Object result = answer.poll(15, TimeUnit.MINUTES);
+            return result instanceof String ? (String) result : null;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
+        }
+    }
+
+    private static void showPasswordDialog(Activity activity, String documentName, final PasswordCheck check,
+                                           final BlockingQueue<Object> answer, final Object cancelled) {
+        final AlertDialog.Builder builder = new AlertDialog.Builder(activity);
+        final Context context = builder.getContext();
+        final float density = context.getResources().getDisplayMetrics().density;
+        final int pad = (int) (20 * density);
+        final int gap = (int) (12 * density);
+
+        LinearLayout root = new LinearLayout(context);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(pad, gap, pad, 0);
+
+        TextView message = new TextView(context);
+        message.setText(documentName == null || documentName.isEmpty()
+                ? "This PDF is password-protected. Enter the password to import it."
+                : documentName + " is password-protected. Enter the password to import it.");
+        root.addView(message);
+
+        final EditText input = new EditText(context);
+        input.setSingleLine(true);
+        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        input.setHint("Password");
+        root.addView(input);
+
+        CheckBox show = new CheckBox(context);
+        show.setText("Show password");
+        show.setOnCheckedChangeListener((button, checked) -> {
+            input.setTransformationMethod(checked ? HideReturnsTransformationMethod.getInstance() : PasswordTransformationMethod.getInstance());
+            input.setSelection(input.getText().length());
+        });
+        root.addView(show);
+
+        builder.setTitle("Password required")
+                .setView(root)
+                .setPositiveButton("Unlock", null) // wired below so a wrong password keeps the dialog open
+                .setNegativeButton("Cancel", null)
+                .setCancelable(true);
+        final AlertDialog dialog = builder.create();
+        dialog.setCanceledOnTouchOutside(false);
+        dialog.setOnDismissListener(d -> answer.offer(cancelled)); // the first answer wins
+        if (dialog.getWindow() != null) {
+            dialog.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE);
+        }
+        dialog.show();
+        input.requestFocus();
+        final View.OnClickListener submit = v -> {
+            String typed = input.getText().toString();
+            if (typed.isEmpty()) {
+                input.setError("Enter the password");
+                return;
+            }
+            if (check.accepts(typed)) {
+                answer.offer(typed);
+                dialog.dismiss();
+            } else {
+                input.setError("Incorrect password. Try again.");
+                input.selectAll();
+            }
+        };
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(submit);
+        input.setOnEditorActionListener((view, actionId, event) -> {
+            submit.onClick(view);
+            return true;
+        });
     }
 
     /**
