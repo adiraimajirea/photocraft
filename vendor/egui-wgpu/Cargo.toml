@@ -1,0 +1,43 @@
+[package]
+name = "egui-wgpu"
+version = "0.37.0"
+authors = [
+  "Nils Hasenbanck <nils@hasenbanck.de>",
+  "embotech <opensource@embotech.com>",
+  "Emil Ernerfeldt <emil.ernerfeldt@gmail.com>",
+]
+edition = "2024"
+rust-version = "1.95"
+description = "Bindings for using egui natively using the wgpu library"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/emilk/egui/tree/main/crates/egui-wgpu"
+
+[features]
+default = [
+  "fragile-send-sync-non-atomic-wasm",
+  "macos-window-resize-jitter-fix",
+  "wgpu/default",
+  "wgpu/webgl",
+]
+capture = ["dep:egui"]
+winit = ["dep:winit", "winit/rwh_06", "dep:egui", "capture"]
+wayland = ["winit?/wayland"]
+x11 = ["winit?/x11"]
+fragile-send-sync-non-atomic-wasm = ["wgpu/fragile-send-sync-non-atomic-wasm"]
+macos-window-resize-jitter-fix = ["wgpu/metal"]
+
+[dependencies]
+epaint = { version = "0.37.0", default-features = false, features = ["bytemuck"] }
+ahash = { version = "0.8.12", default-features = false, features = ["no-rng", "std"] }
+bytemuck = "1.25"
+document-features = "0.2.12"
+log = { version = "0.4.34", features = ["std"] }
+profiling = { version = "1.0", default-features = false }
+thiserror = "2.0"
+type-map = "0.5.1"
+web-time = "1.1"
+wgpu = { version = "30.0", default-features = false, features = ["std", "wgsl"] }
+
+# Optional dependencies:
+egui = { version = "0.37.0", optional = true, default-features = false }
+winit = { version = "0.30.13", optional = true, default-features = false }
