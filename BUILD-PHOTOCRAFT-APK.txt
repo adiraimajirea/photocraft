@@ -1,0 +1,20 @@
+PhotoCraft with PDF import - how to build the APK
+==================================================
+This is MostafaXS1/artcraft-android with the PDF import patch applied.
+The CI workflow is trimmed to build only PhotoCraft.
+
+Option A - GitHub Actions (no tools needed, works from a browser)
+ 1. Create a new empty repository on GitHub.
+ 2. Upload every file from this zip (keep the folders, include the hidden
+    .github folder), then commit to the main branch.
+ 3. Open the Actions tab > "Build APKs" (it starts automatically on commit;
+    or press Run workflow and pick debug or release).
+ 4. After about 45 minutes open the finished run and download
+    "photocraft-apk" from Artifacts. Unzip it to get the .apk.
+ 5. Copy the APK to your phone and install it (allow "install unknown apps").
+    The APK is arm64 only and needs Android 9 or newer.
+
+Option B - build on a Linux PC
+ Requirements: git, Rust + cargo, Python 3.11+, a JDK 17-23.
+   bash build-debug.sh -photocraft      (or: bash build.sh -photocraft)
+ The APK is written to output/. The script fetches the Android SDK/NDK itself.
